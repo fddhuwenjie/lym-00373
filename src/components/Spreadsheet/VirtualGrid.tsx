@@ -1,10 +1,19 @@
 import React, { useEffect, useRef, useCallback, useState } from 'react';
 import { useSpreadsheetStore } from '../../store/useSpreadsheetStore';
-import type { Cell, CellFormat } from '../../../shared/types';
+import type { Cell, CellStyle } from '../../../shared/types';
+import { evaluateConditionalFormat, mergeCellStyles, formatNumber, parseNumberFormat } from '../../utils/conditionalFormat/conditionalFormatEngine';
+import { createCompoundKey } from '../../utils/formula';
 
 interface VirtualGridProps {
   onCellClick: (cellId: string, event: React.MouseEvent) => void;
   onCellDoubleClick: (cellId: string) => void;
+}
+
+interface ContextMenuState {
+  visible: boolean;
+  x: number;
+  y: number;
+  cellId: string | null;
 }
 
 const ROWS = 100;
@@ -15,6 +24,7 @@ const CELL_WIDTH = 120;
 const CELL_HEIGHT = 32;
 const SCROLLBAR_WIDTH = 14;
 const SCROLLBAR_HEIGHT = 14;
+const SPILL_MARKER_SIZE = 8;
 
 export const VirtualGrid: React.FC<VirtualGridProps> = ({ onCellClick, onCellDoubleClick }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -25,16 +35,35 @@ export const VirtualGrid: React.FC<VirtualGridProps> = ({ onCellClick, onCellDou
   const [isDragging, setIsDragging] = useState(false);
   const [selectionStart, setSelectionStart] = useState<string | null>(null);
   const [selectionEnd, setSelectionEnd] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState>({ visible: false, x: 0, y: 0, cellId: null });
 
   const cells = useSpreadsheetStore(state => state.cells);
   const selectedCell = useSpreadsheetStore(state => state.selectedCell);
   const circularCells = useSpreadsheetStore(state => state.circularCells);
+  const activeSheetId = useSpreadsheetStore(state => state.activeSheetId);
+  const cellStyles = useSpreadsheetStore(state => state.cellStyles);
+  const conditionalFormats = useSpreadsheetStore(state => state.conditionalFormats);
+  const collaborators = useSpreadsheetStore(state => state.collaborators);
+  const sheets = useSpreadsheetStore(state => state.sheets);
 
-  const formatCellValue = (cell: Cell): string => {
+  const getSheetsMap = useCallback(() => {
+    const map: Record<string, Record<string, Cell>> = {};
+    sheets.forEach(sheet => {
+      map[sheet.id] = sheet.cells;
+    });
+    return map;
+  }, [sheets]);
+
+  const formatCellValue = useCallback((cell: Cell, style?: CellStyle): string => {
     if (cell.value === null || cell.value === undefined) return '';
     
     if (cell.isError || cell.isCircular) {
       return cell.errorMessage || '#ERROR!';
+    }
+
+    if (style?.numberFormat && typeof cell.value === 'number') {
+      const { type, options } = parseNumberFormat(style.numberFormat);
+      return formatNumber(cell.value, type, options);
     }
 
     const format = cell.format;
@@ -68,7 +97,52 @@ export const VirtualGrid: React.FC<VirtualGridProps> = ({ onCellClick, onCellDou
     }
 
     return String(value);
-  };
+  }, []);
+
+  const getCellStyle = useCallback((cell: Cell, cellId: string): { textColor: string; backgroundColor: string; fontBold: boolean; fontItalic: boolean; textAlign: 'left' | 'center' | 'right' | undefined } => {
+    const compoundKey = createCompoundKey(activeSheetId, cellId);
+    const baseStyle = cellStyles[compoundKey];
+    
+    const sheetsMap = getSheetsMap();
+    const conditionalResults = conditionalFormats
+      .filter(f => f.sheetId === activeSheetId)
+      .map(format => evaluateConditionalFormat(format, sheetsMap, compoundKey));
+    
+    const mergedStyle = mergeCellStyles(baseStyle, conditionalResults);
+    
+    let textColor = cell.format?.textColor || '#1f2937';
+    let backgroundColor = cell.format?.backgroundColor || '#ffffff';
+    let fontBold = cell.format?.isBold || false;
+    let fontItalic = cell.format?.isItalic || false;
+    let textAlign = cell.format?.align;
+
+    if (baseStyle) {
+      if (baseStyle.fontColor) textColor = baseStyle.fontColor;
+      if (baseStyle.bgColor && !baseStyle.bgColor.startsWith('linear-gradient')) {
+        backgroundColor = baseStyle.bgColor;
+      }
+      if (baseStyle.bold) fontBold = baseStyle.bold;
+      if (baseStyle.italic) fontItalic = baseStyle.italic;
+      if (baseStyle.align) textAlign = baseStyle.align;
+    }
+
+    if (mergedStyle.color) textColor = mergedStyle.color as string;
+    if (mergedStyle.backgroundColor) backgroundColor = mergedStyle.backgroundColor as string;
+    if (mergedStyle.background) backgroundColor = mergedStyle.background as string;
+    if (mergedStyle.fontWeight === 'bold') fontBold = true;
+    if (mergedStyle.fontStyle === 'italic') fontItalic = true;
+    if (mergedStyle.textAlign) textAlign = mergedStyle.textAlign as 'left' | 'center' | 'right';
+
+    if (cell.isCircular || cell.isError) {
+      textColor = '#dc2626';
+    }
+
+    if (cell.isCircular) {
+      backgroundColor = '#fef2f2';
+    }
+
+    return { textColor, backgroundColor, fontBold, fontItalic, textAlign };
+  }, [activeSheetId, cellStyles, conditionalFormats, getSheetsMap]);
 
   const getCellTextColor = (cell: Cell): string => {
     if (cell.isCircular) return '#dc2626';
@@ -110,6 +184,35 @@ export const VirtualGrid: React.FC<VirtualGridProps> = ({ onCellClick, onCellDou
 
   const positionToCellId = (col: number, row: number): string => {
     return `${String.fromCharCode(65 + col)}${row + 1}`;
+  };
+
+  const getCellFromPoint = (clientX: number, clientY: number): string | null => {
+    const canvas = canvasRef.current;
+    if (!canvas) return null;
+
+    const rect = canvas.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+
+    if (x < ROW_HEADER_WIDTH || y < COL_HEADER_HEIGHT) return null;
+
+    const viewportWidth = containerSize.width - ROW_HEADER_WIDTH - SCROLLBAR_WIDTH;
+    const viewportHeight = containerSize.height - COL_HEADER_HEIGHT - SCROLLBAR_HEIGHT;
+    const totalWidth = COLS * CELL_WIDTH;
+    const totalHeight = ROWS * CELL_HEIGHT;
+    const maxScrollLeft = Math.max(0, totalWidth - viewportWidth);
+    const maxScrollTop = Math.max(0, totalHeight - viewportHeight);
+    const clampedScrollLeft = Math.min(scrollLeft, maxScrollLeft);
+    const clampedScrollTop = Math.min(scrollTop, maxScrollTop);
+
+    const col = Math.floor((x - ROW_HEADER_WIDTH + clampedScrollLeft) / CELL_WIDTH);
+    const row = Math.floor((y - COL_HEADER_HEIGHT + clampedScrollTop) / CELL_HEIGHT);
+
+    if (col >= 0 && col < COLS && row >= 0 && row < ROWS) {
+      return positionToCellId(col, row);
+    }
+
+    return null;
   };
 
   const render = useCallback(() => {
@@ -199,12 +302,28 @@ export const VirtualGrid: React.FC<VirtualGridProps> = ({ onCellClick, onCellDou
         const x = ROW_HEADER_WIDTH + (col * CELL_WIDTH) - clampedScrollLeft;
         const y = COL_HEADER_HEIGHT + (row * CELL_HEIGHT) - clampedScrollTop;
         const cell = cells[cellId] || { id: cellId, type: 'text', rawValue: '', value: '', isError: false, isCircular: false };
+        const compoundKey = createCompoundKey(activeSheetId, cellId);
+        const style = cellStyles[compoundKey];
+        const { textColor, backgroundColor, fontBold, fontItalic, textAlign } = getCellStyle(cell, cellId);
 
-        ctx.fillStyle = getCellBackgroundColor(cell, cellId);
+        ctx.fillStyle = backgroundColor;
         ctx.fillRect(x, y, CELL_WIDTH, CELL_HEIGHT);
 
-        ctx.strokeStyle = '#e5e7eb';
-        ctx.lineWidth = 1;
+        let borderColor = '#e5e7eb';
+        let borderWidth = 1;
+
+        if (cell.isSpillCell) {
+          borderColor = '#bfdbfe';
+          borderWidth = 2;
+        }
+
+        if (cell.errorMessage === '#SPILL!') {
+          borderColor = '#dc2626';
+          borderWidth = 2;
+        }
+
+        ctx.strokeStyle = borderColor;
+        ctx.lineWidth = borderWidth;
         ctx.strokeRect(x, y, CELL_WIDTH, CELL_HEIGHT);
 
         if (cellId === selectedCell) {
@@ -213,17 +332,37 @@ export const VirtualGrid: React.FC<VirtualGridProps> = ({ onCellClick, onCellDou
           ctx.strokeRect(x + 1, y + 1, CELL_WIDTH - 2, CELL_HEIGHT - 2);
         }
 
-        const text = formatCellValue(cell);
+        if (cell.spillSource && cell.spillSource === cellId) {
+          ctx.fillStyle = '#3b82f6';
+          ctx.fillRect(
+            x + CELL_WIDTH - SPILL_MARKER_SIZE - 2,
+            y + CELL_HEIGHT - SPILL_MARKER_SIZE - 2,
+            SPILL_MARKER_SIZE,
+            SPILL_MARKER_SIZE
+          );
+        }
+
+        const text = formatCellValue(cell, style);
         let font = '13px "JetBrains Mono", monospace';
-        if (cell.format?.isBold) {
+        if (fontBold) {
           font = 'bold ' + font;
         }
-        if (cell.format?.isItalic) {
+        if (fontItalic) {
           font = 'italic ' + font;
         }
         ctx.font = font;
-        ctx.fillStyle = getCellTextColor(cell);
-        ctx.textAlign = 'left';
+        ctx.fillStyle = textColor;
+        
+        let textX = x + 8;
+        if (textAlign === 'center') {
+          ctx.textAlign = 'center';
+          textX = x + CELL_WIDTH / 2;
+        } else if (textAlign === 'right') {
+          ctx.textAlign = 'right';
+          textX = x + CELL_WIDTH - 8;
+        } else {
+          ctx.textAlign = 'left';
+        }
         ctx.textBaseline = 'middle';
 
         const padding = 8;
@@ -239,9 +378,32 @@ export const VirtualGrid: React.FC<VirtualGridProps> = ({ onCellClick, onCellDou
           displayText = truncated + '...';
         }
 
-        ctx.fillText(displayText, x + padding, y + CELL_HEIGHT / 2);
+        ctx.fillText(displayText, textX, y + CELL_HEIGHT / 2);
       }
     }
+
+    Object.entries(collaborators).forEach(([userId, collab]) => {
+      if (collab.sheetId !== activeSheetId || !collab.cellId) return;
+      
+      const { col, row } = cellIdToPosition(collab.cellId);
+      if (col < startCol || col > endCol || row < startRow || row > endRow) return;
+
+      const x = ROW_HEADER_WIDTH + (col * CELL_WIDTH) - clampedScrollLeft;
+      const y = COL_HEADER_HEIGHT + (row * CELL_HEIGHT) - clampedScrollTop;
+
+      ctx.strokeStyle = collab.color;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x + 1, y + 1, CELL_WIDTH - 2, CELL_HEIGHT - 2);
+
+      ctx.fillStyle = collab.color;
+      ctx.fillRect(x + 1, y - 18, 60, 18);
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 10px Inter, system-ui, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(collab.name, x + 4, y - 9);
+    });
 
     if (totalWidth > viewportWidth) {
       const scrollbarX = clampedScrollLeft / totalWidth * viewportWidth;
@@ -293,7 +455,7 @@ export const VirtualGrid: React.FC<VirtualGridProps> = ({ onCellClick, onCellDou
       SCROLLBAR_HEIGHT
     );
 
-  }, [containerSize, scrollTop, scrollLeft, cells, selectedCell, circularCells, selectionStart, selectionEnd]);
+  }, [containerSize, scrollTop, scrollLeft, cells, selectedCell, circularCells, selectionStart, selectionEnd, activeSheetId, cellStyles, conditionalFormats, collaborators, formatCellValue, getCellStyle, getSheetsMap]);
 
   useEffect(() => {
     render();
@@ -312,36 +474,10 @@ export const VirtualGrid: React.FC<VirtualGridProps> = ({ onCellClick, onCellDou
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
-  const getCellFromPoint = (clientX: number, clientY: number): string | null => {
-    const canvas = canvasRef.current;
-    if (!canvas) return null;
-
-    const rect = canvas.getBoundingClientRect();
-    const x = clientX - rect.left;
-    const y = clientY - rect.top;
-
-    if (x < ROW_HEADER_WIDTH || y < COL_HEADER_HEIGHT) return null;
-
-    const viewportWidth = containerSize.width - ROW_HEADER_WIDTH - SCROLLBAR_WIDTH;
-    const viewportHeight = containerSize.height - COL_HEADER_HEIGHT - SCROLLBAR_HEIGHT;
-    const totalWidth = COLS * CELL_WIDTH;
-    const totalHeight = ROWS * CELL_HEIGHT;
-    const maxScrollLeft = Math.max(0, totalWidth - viewportWidth);
-    const maxScrollTop = Math.max(0, totalHeight - viewportHeight);
-    const clampedScrollLeft = Math.min(scrollLeft, maxScrollLeft);
-    const clampedScrollTop = Math.min(scrollTop, maxScrollTop);
-
-    const col = Math.floor((x - ROW_HEADER_WIDTH + clampedScrollLeft) / CELL_WIDTH);
-    const row = Math.floor((y - COL_HEADER_HEIGHT + clampedScrollTop) / CELL_HEIGHT);
-
-    if (col >= 0 && col < COLS && row >= 0 && row < ROWS) {
-      return positionToCellId(col, row);
-    }
-
-    return null;
-  };
-
   const handleMouseDown = (e: React.MouseEvent) => {
+    if (contextMenu.visible) {
+      setContextMenu({ ...contextMenu, visible: false });
+    }
     const cellId = getCellFromPoint(e.clientX, e.clientY);
     if (cellId) {
       setIsDragging(true);
@@ -385,6 +521,63 @@ export const VirtualGrid: React.FC<VirtualGridProps> = ({ onCellClick, onCellDou
     setScrollTop(prev => Math.max(0, Math.min(maxScrollTop, prev + e.deltaY)));
   };
 
+  const handleContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const cellId = getCellFromPoint(e.clientX, e.clientY);
+    if (cellId) {
+      const rect = canvasRef.current?.getBoundingClientRect();
+      if (rect) {
+        setContextMenu({
+          visible: true,
+          x: e.clientX - rect.left,
+          y: e.clientY - rect.top,
+          cellId
+        });
+      }
+    }
+  };
+
+  const handleInsertChart = () => {
+    if (!selectionStart && !selectionEnd) return;
+    const state = useSpreadsheetStore.getState();
+    if (!state.workbookId) return;
+    const { startCol, startRow, endCol, endRow } = getSelectionRange();
+    const minCol = Math.min(startCol, endCol);
+    const maxCol = Math.max(startCol, endCol);
+    const minRow = Math.min(startRow, endRow);
+    const maxRow = Math.max(startRow, endRow);
+    const rangeRef = `${String.fromCharCode(65 + minCol)}${minRow + 1}:${String.fromCharCode(65 + maxCol)}${maxRow + 1}`;
+    
+    state.addChart({
+      workbookId: state.workbookId,
+      sheetId: activeSheetId,
+      rangeRef,
+      type: 'bar',
+      options: { title: 'New Chart' }
+    });
+    setContextMenu({ ...contextMenu, visible: false });
+  };
+
+  const handleSetCellFormat = () => {
+    setContextMenu({ ...contextMenu, visible: false });
+  };
+
+  const handleInsertRow = () => {
+    setContextMenu({ ...contextMenu, visible: false });
+  };
+
+  const handleDeleteRow = () => {
+    setContextMenu({ ...contextMenu, visible: false });
+  };
+
+  const handleInsertColumn = () => {
+    setContextMenu({ ...contextMenu, visible: false });
+  };
+
+  const handleDeleteColumn = () => {
+    setContextMenu({ ...contextMenu, visible: false });
+  };
+
   const getEditorPosition = (cellId: string): { x: number; y: number; width: number; height: number } | null => {
     const { col, row } = cellIdToPosition(cellId);
     
@@ -413,6 +606,8 @@ export const VirtualGrid: React.FC<VirtualGridProps> = ({ onCellClick, onCellDou
     };
   };
 
+  const hasSelection = selectionStart && selectionEnd && selectionStart !== selectionEnd;
+
   return (
     <div ref={containerRef} className="relative flex-1 overflow-hidden bg-white">
       <canvas
@@ -425,7 +620,56 @@ export const VirtualGrid: React.FC<VirtualGridProps> = ({ onCellClick, onCellDou
         onMouseLeave={handleMouseUp}
         onDoubleClick={handleDoubleClick}
         onWheel={handleWheel}
+        onContextMenu={handleContextMenu}
       />
+      
+      {contextMenu.visible && (
+        <div
+          className="absolute bg-white border border-gray-200 rounded-md shadow-lg z-20 min-w-[160px]"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+        >
+          {hasSelection && (
+            <button
+              className="w-full px-4 py-2 text-left text-sm hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed"
+              onClick={handleInsertChart}
+            >
+              插入图表
+            </button>
+          )}
+          <button
+            className="w-full px-4 py-2 text-left text-sm hover:bg-gray-100"
+            onClick={handleSetCellFormat}
+          >
+            设置单元格格式
+          </button>
+          <div className="border-t border-gray-200 my-1" />
+          <button
+            className="w-full px-4 py-2 text-left text-sm hover:bg-gray-100"
+            onClick={handleInsertRow}
+          >
+            插入行
+          </button>
+          <button
+            className="w-full px-4 py-2 text-left text-sm hover:bg-gray-100"
+            onClick={handleDeleteRow}
+          >
+            删除行
+          </button>
+          <div className="border-t border-gray-200 my-1" />
+          <button
+            className="w-full px-4 py-2 text-left text-sm hover:bg-gray-100"
+            onClick={handleInsertColumn}
+          >
+            插入列
+          </button>
+          <button
+            className="w-full px-4 py-2 text-left text-sm hover:bg-gray-100"
+            onClick={handleDeleteColumn}
+          >
+            删除列
+          </button>
+        </div>
+      )}
       
       {selectedCell && (() => {
         const pos = getEditorPosition(selectedCell);

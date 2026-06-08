@@ -159,6 +159,10 @@ export class Parser {
         return this.parseFunctionCall();
       }
       
+      if (this.peek(1).type === 'Exclamation') {
+        return this.parseCrossSheetReference();
+      }
+      
       if (token.value === 'TRUE') {
         this.position++;
         return { type: 'Boolean', value: true };
@@ -188,12 +192,18 @@ export class Parser {
     throw new Error(`Unexpected token: ${token.type} "${token.value}" at position ${token.position}`);
   }
 
-  private parseCellReferenceOrRange(): ASTNode {
-    const startRef = this.parseCellReference();
+  private parseCrossSheetReference(): ASTNode {
+    const sheetId = this.expect('Identifier').value;
+    this.expect('Exclamation');
+    return this.parseCellReferenceOrRange(sheetId);
+  }
+
+  private parseCellReferenceOrRange(sheetId?: string): ASTNode {
+    const startRef = this.parseCellReference(sheetId);
     
     if (this.current().type === 'Colon') {
       this.expect('Colon');
-      const endRef = this.parseCellReference();
+      const endRef = this.parseCellReference(sheetId);
       return {
         type: 'CellRange',
         start: startRef,
@@ -204,7 +214,7 @@ export class Parser {
     return startRef;
   }
 
-  private parseCellReference(): CellReferenceNode {
+  private parseCellReference(sheetId?: string): CellReferenceNode {
     const token = this.expect('CellReference');
     const value = token.value;
     
@@ -239,7 +249,8 @@ export class Parser {
       column: columnPart,
       row: parseInt(rowPart, 10),
       columnAbsolute,
-      rowAbsolute
+      rowAbsolute,
+      sheetId
     };
   }
 

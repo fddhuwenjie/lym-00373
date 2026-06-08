@@ -1,8 +1,7 @@
-/**
- * local server entry file, for local development
- */
 import app from './app.js';
 import { initDatabase } from './db/init.js';
+import { CollaborationServer } from './ws/collaborationServer.js';
+import http from 'http';
 
 const PORT = process.env.PORT || 3001;
 
@@ -11,8 +10,14 @@ async function startServer() {
     await initDatabase();
     console.log('Database initialized');
     
-    const server = app.listen(PORT, () => {
+    const server = http.createServer(app);
+    
+    new CollaborationServer(server);
+    console.log('Collaboration WebSocket server initialized');
+    
+    server.listen(PORT, () => {
       console.log(`Server ready on port ${PORT}`);
+      console.log(`WebSocket: ws://localhost:${PORT}/ws/workbooks/:id`);
     });
 
     process.on('SIGTERM', () => {

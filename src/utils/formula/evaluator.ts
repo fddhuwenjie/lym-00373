@@ -3,17 +3,19 @@ import type { Cell } from '../../../shared/types';
 import { builtinFunctions } from './functions';
 
 export class Evaluator {
-  private cells: Record<string, Cell>;
+  private sheets: Record<string, Record<string, Cell>>;
+  private defaultSheetId: string;
 
-  constructor(cells: Record<string, Cell>) {
-    this.cells = cells;
+  constructor(sheets: Record<string, Record<string, Cell>>, defaultSheetId: string) {
+    this.sheets = sheets;
+    this.defaultSheetId = defaultSheetId;
   }
 
-  evaluate(ast: ASTNode): number | string | boolean | null | Cell[] {
+  evaluate(ast: ASTNode): number | string | boolean | null | Cell[] | Date {
     return this.evaluateNode(ast);
   }
 
-  private evaluateNode(node: ASTNode): number | string | boolean | null | Cell[] {
+  private evaluateNode(node: ASTNode): number | string | boolean | null | Cell[] | Date {
     switch (node.type) {
       case 'Number':
         return node.value;
@@ -47,9 +49,18 @@ export class Evaluator {
     }
   }
 
-  private evaluateCellReference(node: CellReferenceNode): number | string | boolean | null | Cell[] {
+  private getCell(sheetId: string | undefined, cellId: string): Cell | null {
+    const resolvedSheetId = sheetId || this.defaultSheetId;
+    const sheetCells = this.sheets[resolvedSheetId];
+    if (!sheetCells) {
+      return null;
+    }
+    return sheetCells[cellId] || null;
+  }
+
+  private evaluateCellReference(node: CellReferenceNode): number | string | boolean | null | Cell[] | Date {
     const cellId = `${node.column}${node.row}`;
-    const cell = this.cells[cellId];
+    const cell = this.getCell(node.sheetId, cellId);
     
     if (!cell) {
       return null;
@@ -73,6 +84,12 @@ export class Evaluator {
   private evaluateCellRange(node: CellRangeNode): Cell[] {
     const cells: Cell[] = [];
     
+    const sheetId = node.start.sheetId || this.defaultSheetId;
+    const sheetCells = this.sheets[sheetId];
+    if (!sheetCells) {
+      return cells;
+    }
+    
     const startCol = node.start.column;
     const startRow = node.start.row;
     const endCol = node.end.column;
@@ -90,7 +107,7 @@ export class Evaluator {
       const colLetter = String.fromCharCode(65 + col);
       for (let row = minRow; row <= maxRow; row++) {
         const cellId = `${colLetter}${row}`;
-        const cell = this.cells[cellId];
+        const cell = sheetCells[cellId];
         if (cell) {
           cells.push(cell);
         }
@@ -100,7 +117,7 @@ export class Evaluator {
     return cells;
   }
 
-  private evaluateBinaryOperation(node: { operator: string; left: ASTNode; right: ASTNode }): number | string | boolean | null | Cell[] {
+  private evaluateBinaryOperation(node: { operator: string; left: ASTNode; right: ASTNode }): number | string | boolean | null | Cell[] | Date {
     const left = this.evaluateNode(node.left);
     const right = this.evaluateNode(node.right);
     
@@ -155,7 +172,7 @@ export class Evaluator {
     }
   }
 
-  private evaluateUnaryOperation(node: { operator: string; operand: ASTNode }): number | string | boolean | null | Cell[] {
+  private evaluateUnaryOperation(node: { operator: string; operand: ASTNode }): number | string | boolean | null | Cell[] | Date {
     const operand = this.evaluateNode(node.operand);
     
     if (typeof operand === 'string' && operand.startsWith('#') && operand.endsWith('!')) {
@@ -174,7 +191,7 @@ export class Evaluator {
     }
   }
 
-  private evaluateFunctionCall(node: { name: string; arguments: ASTNode[] }): number | string | boolean | null | Cell[] {
+  private evaluateFunctionCall(node: { name: string; arguments: ASTNode[] }): number | string | boolean | null | Cell[] | Date {
     const func = builtinFunctions[node.name.toUpperCase()];
     
     if (!func) {
@@ -188,7 +205,7 @@ export class Evaluator {
     const evaluatedArgs = node.arguments.map(arg => this.evaluateNode(arg));
     
     try {
-      return func.execute(evaluatedArgs, this.cells);
+      return func.execute(evaluatedArgs, this.sheets, this.defaultSheetId);
     } catch (error) {
       return `#ERROR!`;
     }

@@ -34,6 +34,7 @@ export interface CellReferenceNode extends BaseASTNode {
   row: number;
   columnAbsolute: boolean;
   rowAbsolute: boolean;
+  sheetId?: string;
 }
 
 export interface CellRangeNode extends BaseASTNode {

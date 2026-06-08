@@ -8,6 +8,7 @@ export type TokenType =
   | 'RightParen'
   | 'Comma'
   | 'Colon'
+  | 'Exclamation'
   | 'EOF';
 
 export interface Token {
@@ -34,6 +35,8 @@ export class Lexer {
 
       if (char === '"') {
         this.readString();
+      } else if (char === "'") {
+        this.readQuotedSheetReference();
       } else if (this.isDigit(char)) {
         this.readNumber();
       } else if (this.isLetter(char) || char === '_') {
@@ -51,6 +54,9 @@ export class Lexer {
         this.position++;
       } else if (char === ':') {
         this.tokens.push({ type: 'Colon', value: ':', position: this.position });
+        this.position++;
+      } else if (char === '!') {
+        this.tokens.push({ type: 'Exclamation', value: '!', position: this.position });
         this.position++;
       } else {
         throw new Error(`Unexpected character: ${char} at position ${this.position}`);
@@ -101,6 +107,30 @@ export class Lexer {
     }
 
     this.tokens.push({ type: 'String', value, position: startPos });
+  }
+
+  private readQuotedSheetReference(): void {
+    const startPos = this.position;
+    this.position++;
+    let sheetName = '';
+
+    while (this.position < this.input.length) {
+      const char = this.input[this.position];
+      if (char === "'") {
+        if (this.position + 1 < this.input.length && this.input[this.position + 1] === "'") {
+          sheetName += "'";
+          this.position += 2;
+        } else {
+          this.position++;
+          break;
+        }
+      } else {
+        sheetName += char;
+        this.position++;
+      }
+    }
+
+    this.tokens.push({ type: 'Identifier', value: sheetName, position: startPos });
   }
 
   private readNumber(): void {
