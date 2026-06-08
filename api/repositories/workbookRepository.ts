@@ -25,8 +25,8 @@ export class WorkbookRepository {
 
   static findById(id: number): Workbook | null {
     const db = getDatabase();
-    const stmt = db.prepare('SELECT * FROM workbooks WHERE id = ?');
-    stmt.bind([id]);
+    const stmt = db.prepare('SELECT * FROM workbooks WHERE id = $id');
+    stmt.bind({ $id: id });
     
     if (!stmt.step()) {
       stmt.free();
@@ -49,9 +49,10 @@ export class WorkbookRepository {
     const db = getDatabase();
     const stmt = db.prepare('INSERT INTO workbooks (name, cells) VALUES (?, ?)');
     stmt.run([workbook.name, JSON.stringify(workbook.cells)]);
-    saveDatabase();
     
     const id = db.exec('SELECT last_insert_rowid() as id')[0].values[0][0] as number;
+    saveDatabase();
+    
     const created = this.findById(id);
     if (!created) throw new Error('Failed to create workbook');
     return created;
@@ -61,10 +62,11 @@ export class WorkbookRepository {
     const db = getDatabase();
     const stmt = db.prepare('UPDATE workbooks SET name = ?, cells = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?');
     stmt.run([workbook.name, JSON.stringify(workbook.cells), id]);
-    saveDatabase();
     
     const changes = db.exec('SELECT changes() as c')[0].values[0][0] as number;
     if (changes === 0) return null;
+    
+    saveDatabase();
     return this.findById(id);
   }
 
@@ -72,9 +74,11 @@ export class WorkbookRepository {
     const db = getDatabase();
     const stmt = db.prepare('DELETE FROM workbooks WHERE id = ?');
     stmt.run([id]);
-    saveDatabase();
     
     const changes = db.exec('SELECT changes() as c')[0].values[0][0] as number;
-    return changes > 0;
+    if (changes === 0) return false;
+    
+    saveDatabase();
+    return true;
   }
 }
