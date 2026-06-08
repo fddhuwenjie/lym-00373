@@ -520,11 +520,19 @@ export class WorkbookController {
       const operation = req.body as Operation & { workbookId: number; version: number };
       operation.id = operation.id || uuidv4();
       operation.workbookId = workbookId;
+      operation.timestamp = operation.timestamp && operation.timestamp > 0 ? operation.timestamp : Date.now();
       operation.version = operation.version || WorkbookService.getVersion(workbookId) + 1;
-      operation.lamportTime = Math.max(
-        operation.lamportTime,
-        WorkbookService.getMaxLamportTime(workbookId) + 1
-      );
+      
+      const maxLamport = WorkbookService.getMaxLamportTime(workbookId) + 1;
+      operation.lamportTime = operation.lamportTime && operation.lamportTime > 0
+        ? Math.max(operation.lamportTime, maxLamport)
+        : maxLamport;
+      
+      operation.userId = operation.userId || 'anonymous';
+      operation.userName = operation.userName || 'Anonymous User';
+      operation.sheetId = operation.sheetId || '';
+      operation.payload = operation.payload || {};
+      operation.type = operation.type || 'cellUpdate';
       
       const created = WorkbookService.createOperation(operation);
       WorkbookService.updateVersion(workbookId, operation.version);

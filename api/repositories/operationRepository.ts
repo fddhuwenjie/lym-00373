@@ -103,6 +103,16 @@ export class OperationRepository {
     
     const opId = operation.id || uuidv4();
     
+    const timestamp = operation.timestamp && !isNaN(operation.timestamp) && operation.timestamp > 0
+      ? operation.timestamp
+      : Date.now();
+    
+    const lamportTime = operation.lamportTime && !isNaN(operation.lamportTime) && operation.lamportTime > 0
+      ? operation.lamportTime
+      : this.getMaxLamportTime(operation.workbookId) + 1;
+    
+    const sheetId = operation.sheetId || '';
+    
     const stmt = db.prepare(`
       INSERT INTO operations 
       (id, workbook_id, type, timestamp, lamport_time, user_id, user_name, sheet_id, payload, reverse_payload, version)
@@ -113,12 +123,12 @@ export class OperationRepository {
       opId,
       operation.workbookId,
       operation.type,
-      new Date(operation.timestamp).toISOString(),
-      operation.lamportTime,
-      operation.userId,
-      operation.userName,
-      operation.sheetId,
-      JSON.stringify(operation.payload),
+      new Date(timestamp).toISOString(),
+      lamportTime,
+      operation.userId || '',
+      operation.userName || '',
+      sheetId,
+      JSON.stringify(operation.payload || {}),
       operation.reversePayload ? JSON.stringify(operation.reversePayload) : null,
       operation.version
     ]);

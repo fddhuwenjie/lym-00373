@@ -136,46 +136,93 @@ function migrateExistingWorkbooks(db: Database): void {
   const columns = db.exec("PRAGMA table_info(workbooks)");
   const columnNames = columns[0].values.map(col => col[1] as string);
 
-  if (!columnNames.includes('cells')) return;
-
-  const rows = db.exec('SELECT id, name, cells FROM workbooks');
-  if (rows.length === 0) return;
-
-  const values = rows[0].values;
-  for (const row of values) {
-    const id = row[0] as number;
-    const name = row[1] as string;
-    const cellsJson = row[2] as string;
-    
-    let cells: Record<string, unknown> = {};
-    try {
-      cells = JSON.parse(cellsJson);
-    } catch {
-      cells = {};
+  const requiredColumns = ['sheets', 'active_sheet_id', 'version'];
+  const missingColumns = requiredColumns.filter(col => !columnNames.includes(col));
+  
+  if (missingColumns.length > 0) {
+    for (const col of missingColumns) {
+      if (col === 'sheets') {
+        db.run(`ALTER TABLE workbooks ADD COLUMN sheets TEXT NOT NULL DEFAULT '[]'`);
+      } else if (col === 'active_sheet_id') {
+        db.run(`ALTER TABLE workbooks ADD COLUMN active_sheet_id TEXT NOT NULL DEFAULT 'sheet1'`);
+      } else if (col === 'version') {
+        db.run(`ALTER TABLE workbooks ADD COLUMN version INTEGER NOT NULL DEFAULT 0`);
+      }
     }
-
-    const sheetId = 'sheet1';
-    const sheets = [{
-      id: sheetId,
-      name: 'Sheet1',
-      index: 0,
-      cells,
-      isHidden: false
-    }];
-
-    const stmt = db.prepare(`
-      UPDATE workbooks 
-      SET sheets = ?, active_sheet_id = ?, version = 0
-      WHERE id = ?
-    `);
-    stmt.run([JSON.stringify(sheets), sheetId, id]);
-    stmt.free();
   }
 
   if (columnNames.includes('cells')) {
+    const rows = db.exec('SELECT id, name, cells FROM workbooks');
+    if (rows.length > 0) {
+      const values = rows[0].values;
+      for (const row of values) {
+        const id = row[0] as number;
+        const name = row[1] as string;
+        const cellsJson = row[2] as string;
+        
+        let cells: Record<string, unknown> = {};
+        try {
+          cells = JSON.parse(cellsJson);
+        } catch {
+          cells = {};
+        }
+
+        const sheetId = 'sheet1';
+        const sheets = [{
+          id: sheetId,
+          name: 'Sheet1',
+          index: 0,
+          cells,
+          isHidden: false
+        }];
+
+        const stmt = db.prepare(`
+          UPDATE workbooks 
+          SET sheets = ?, active_sheet_id = ?, version = COALESCE(version, 0)
+          WHERE id = ?
+        `);
+        stmt.run([JSON.stringify(sheets), sheetId, id]);
+        stmt.free();
+      }
+    }
+
     db.run('CREATE TABLE workbooks_new AS SELECT id, name, sheets, active_sheet_id, version, created_at, updated_at FROM workbooks');
     db.run('DROP TABLE workbooks');
     db.run('ALTER TABLE workbooks_new RENAME TO workbooks');
+  } else {
+    const rows = db.exec('SELECT id, sheets FROM workbooks WHERE sheets IS NULL OR sheets = \'\'');
+    if (rows.length > 0) {
+      for (const row of rows[0].values) {
+        const id = row[0] as number;
+        const sheetId = 'sheet1';
+        const sheets = [{
+          id: sheetId,
+          name: 'Sheet1',
+          index: 0,
+          cells: {},
+          isHidden: false
+        }];
+        
+        db.run(`
+          UPDATE workbooks 
+          SET sheets = ?, active_sheet_id = ?, version = COALESCE(version, 0)
+          WHERE id = ?
+        `, [JSON.stringify(sheets), sheetId, id]);
+      }
+    }
+  }
+
+  const columnsAfter = db.exec("PRAGMA table_info(workbooks)");
+  const columnNamesAfter = columnsAfter[0].values.map(col => col[1] as string);
+  
+  if (columnNamesAfter.includes('version')) {
+    db.run(`UPDATE workbooks SET version = COALESCE(version, 0) WHERE version IS NULL`);
+  }
+  if (columnNamesAfter.includes('active_sheet_id')) {
+    db.run(`UPDATE workbooks SET active_sheet_id = COALESCE(active_sheet_id, 'sheet1') WHERE active_sheet_id IS NULL OR active_sheet_id = ''`);
+  }
+  if (columnNamesAfter.includes('sheets')) {
+    db.run(`UPDATE workbooks SET sheets = '[]' WHERE sheets IS NULL OR sheets = ''`);
   }
 }
 
